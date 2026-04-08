@@ -699,7 +699,7 @@ class CombatScene:
 
     def _desenhar_combate(self):
         titulo = self.fonte_titulo.render(
-            f"INTEGRAL QUEST | Sala {self.sala_atual}/{SALAS_ATE_BOSS}",
+            f"Sala {self.sala_atual}/{SALAS_ATE_BOSS}",
             True,
             COR_OURO,
         )
@@ -1268,7 +1268,7 @@ if __name__ == "__main__":
     pygame.init()
     tela = pygame.display.set_mode((LARGURA, ALTURA), pygame.FULLSCREEN)
     clock = pygame.time.Clock()
-    pygame.display.set_caption("Integral Quest - Roguelike de Turnos")
+    pygame.display.set_caption("Slay the integral - Um Roguelike de Turnos")
 
     menu = Menu(tela, clock)
     while True:
