@@ -48,9 +48,9 @@ class Player:
         self.hp_max = hp_max
         self.hp = hp_max
         self.armas = [
-            Weapon("Lamina da Area", "coleta"),
-            Weapon("Foice Primitiva", "indefinida"),
-            Weapon("Canhao Definido", "definida"),
+            Weapon("Lamina da Area Sob a Curva", "coleta"),
+            Weapon("Foice da Antiderivada", "indefinida"),
+            Weapon("Canhao do Teorema Fundamental", "definida"),
         ]
         self.arma_idx = 0
         self.metodos = {
@@ -229,11 +229,14 @@ class CombatScene:
         self.cor_mensagem = COR_TEXTO
         self.tempo_msg = 220
         self.ultimo_dano = 0
+        self.motivo_derrota = ""
+        self.dica_derrota = ""
 
         self.final_frames = 0
         self.final_reveladas = 0
         self.final_reveal_interval = 50
         self.final_scroll_vel = 0.45
+        self.final_scroll_vel_base = 0.45
         self.final_horizonte_y = 130
         self.final_linhas = [
             "Depois de varias batalhas arduas no reino do calculo...",
@@ -290,8 +293,8 @@ class CombatScene:
             total_pedacos = random.randint(20, 60)
             dano = max(4, int(total_pedacos * 0.6))
             prompt = (
-                "Nocao de Integral: para completar uma area, quantos pedacos de energia você deve juntar"
-                f" se o total eh {total_pedacos}?"
+                "[NOCAO DE INTEGRAL] Pequenas partes formam um todo. Quantas particulas voce soma para"
+                f" completar a area total de {total_pedacos}?"
             )
             return Challenge("coleta", prompt, total_pedacos, dano, 4)
 
@@ -300,8 +303,9 @@ class CombatScene:
             x_ref = random.randint(1, 3)
             resposta = self.math.integral_definida(termos, 0, x_ref)
             prompt = (
-                "Integral Indefinida: encontre F(x) e informe F(" + str(x_ref) + ") assumindo C=0 para f(x)="
+                "[INTEGRAL INDEFINIDA] Encontre a ANTIDERIVADA F(x) cuja derivada eh f(x)="
                 + formatar_polinomio(termos)
+                + ". Depois, informe F(" + str(x_ref) + ") (com C=0)."
             )
             return Challenge("indefinida", prompt, resposta, 22 + self.sala_atual * 2, 9)
 
@@ -310,9 +314,9 @@ class CombatScene:
         termos = self._gerar_termos_integraveis(grau_max=3 if self.enemy.boss else 2, escala=3)
         resposta = self.math.integral_definida(termos, a, b)
         prompt = (
-            "Calcule a integral definida: ("
+            "[INTEGRAL DEFINIDA] Calcule a AREA EXATA sob a curva f(x)=("
             + formatar_polinomio(termos)
-            + f") dx de {a} ate {b}"
+            + f") entre x={a} e x={b}. Encontre F(x) e aplique: F({b})-F({a})."
         )
         return Challenge("definida", prompt, resposta, 26 + self.sala_atual * 2, 10)
 
@@ -322,13 +326,13 @@ class CombatScene:
         k = random.randint(1, 9)
         resposta = coef * x_val + k
         prompt = (
-            "Substituicao (quebra de armadura): se u="
+            "[SUBSTITUICAO] Uma mudanca de variavel para simplificar. Se u="
             + str(coef)
             + "x+"
             + str(k)
-            + ", qual o valor de u quando x="
+            + ", qual eh o valor de u quando x="
             + str(x_val)
-            + "?"
+            + "? (Substitua x direto na formula.)"
         )
         return Challenge("substituicao", prompt, resposta, 0, 6)
 
@@ -338,7 +342,7 @@ class CombatScene:
             self.enemy.partes_termos = termos
             self.enemy.partes_etapa = 1
             resposta = self.math.derivada_valor(termos, 1)
-            prompt = "Integracao por Partes - Etapa 1/2: calcule d/dx de u em x=1 para u=" + formatar_polinomio(termos)
+            prompt = "[PARTES - ETAPA 1] Integracao por partes quebra integrais complexas. Etapa 1: DERIVE u. Para u=" + formatar_polinomio(termos) + ", calcule du/dx em x=1 (use da regra da potencia: nax^(n-1))."
             return Challenge("partes_etapa1", prompt, resposta, 0, 7)
 
         a = random.randint(0, 2)
@@ -347,12 +351,13 @@ class CombatScene:
         self.enemy.partes_b = b
         resposta = self.math.integral_definida(self.enemy.partes_termos, a, b)
         prompt = (
-            "Integracao por Partes - Etapa 2/2: agora integre u de "
+            "[PARTES - ETAPA 2] Agora INTEGRE u de x="
             + str(a)
-            + " ate "
+            + " ate x="
             + str(b)
-            + " para u="
+            + ". Para u="
             + formatar_polinomio(self.enemy.partes_termos)
+            + ", calcule F(b)-F(a)."
         )
         return Challenge("partes_etapa2", prompt, resposta, 36 + self.sala_atual * 2, 9)
 
@@ -361,6 +366,11 @@ class CombatScene:
         dano = dano_base + self.sala_atual
         self.player.tomar_dano(dano)
         self.ultimo_dano = dano
+
+    def _registrar_derrota_se_necessario(self, motivo: str, dica: str):
+        if not self.player.vivo:
+            self.motivo_derrota = motivo
+            self.dica_derrota = dica
 
     def _aplicar_dano_no_inimigo(self, dano: int):
         dano_real = max(1, dano - self.enemy.armor)
@@ -432,6 +442,10 @@ class CombatScene:
                 self.cor_mensagem = COR_ACERTO
             else:
                 self._inimigo_contra_ataca(ch.penalidade)
+                self._registrar_derrota_se_necessario(
+                    "Voce errou o conceito de INTEGRAL como soma de pequenas partes.",
+                    "A integral eh a soma de infinitas particulas infinitesimais. Conte corretamente cada pedaco de energia!",
+                )
                 self.mensagem = "Coleta errada: quantidade incorreta de energia."
                 self.cor_mensagem = COR_ERRO
             self.tempo_msg = 190
@@ -446,6 +460,10 @@ class CombatScene:
                 self.tempo_msg = 180
             else:
                 self._inimigo_contra_ataca(ch.penalidade)
+                self._registrar_derrota_se_necessario(
+                    "Voce falhou em SUBSTITUICAO - troca de variaveis para simplificar.",
+                    "Substituicao: fazemos u=ax+b para transformar o problema. Substitua cuidadosamente TODOS os x!",
+                )
                 self.mensagem = "Substituicao errada: perdeu o turno e a defesa nao baixou."
                 self.cor_mensagem = COR_ERRO
                 self.tempo_msg = 210
@@ -459,6 +477,10 @@ class CombatScene:
                 return
             self.enemy.partes_etapa = 0
             self._inimigo_contra_ataca(ch.penalidade)
+            self._registrar_derrota_se_necessario(
+                "Falhou na DERIVADA (etapa 1 de Integracao por Partes).",
+                "Partes eh uma tecnica que quebra integrais complexas em duas partes. A derivada u' segue: d/dx(ax^n)=a*n*x^(n-1).",
+            )
             self.mensagem = "Erro na derivacao. Combo por partes cancelado."
             self.cor_mensagem = COR_ERRO
             self.tempo_msg = 180
@@ -472,6 +494,10 @@ class CombatScene:
                 self.tempo_msg = 190
             else:
                 self._inimigo_contra_ataca(ch.penalidade)
+                self._registrar_derrota_se_necessario(
+                    "Falhou na INTEGRAL (etapa 2 de Integracao por Partes).",
+                    "Depois de derivar, agora integre! Use F(b)-F(a) onde F eh a primitiva (antiderivada).",
+                )
                 self.mensagem = "Falha na etapa final por partes."
                 self.cor_mensagem = COR_ERRO
                 self.tempo_msg = 190
@@ -491,9 +517,17 @@ class CombatScene:
                 if ch.tipo == "indefinida":
                     # Regra: erro na indefinida reflete metade do dano no heroi.
                     self._inimigo_contra_ataca(max(1, ch.dano_base // 2))
+                    self._registrar_derrota_se_necessario(
+                        "Voce errou a INTEGRAL INDEFINIDA (antiderivada) e sofreu dano refletido!",
+                        "Integral indefinida: busca uma funcao F(x) cuja derivada eh f(x). Integre ax^n para a/(n+1)*x^(n+1).",
+                    )
                     self.mensagem = "Indefinida errada: arma falhou e voce sofreu metade do dano."
                 else:
                     self._inimigo_contra_ataca(ch.penalidade)
+                    self._registrar_derrota_se_necessario(
+                        "Voce errou a INTEGRAL DEFINIDA (com limites de integracao).",
+                        "Integral definida: calcula a AREA EXATA sob a curva de a ate b. Encontre F(x), depois F(b)-F(a).",
+                    )
                     self.mensagem = "Integral errada: o inimigo puniu seu turno."
                 self.cor_mensagem = COR_ERRO
                 self.tempo_msg = 210
@@ -539,6 +573,8 @@ class CombatScene:
         self.cor_mensagem = COR_TEXTO
         self.tempo_msg = 140
         self.ultimo_dano = 0
+        self.motivo_derrota = ""
+        self.dica_derrota = ""
         self.input_field.limpar()
 
     def _selecionar_arma(self, idx: int):
@@ -568,6 +604,11 @@ class CombatScene:
             self.cor_mensagem = COR_ERRO
             self.tempo_msg = 150
             return
+        if self.enemy.partes_etapa != 0:
+            self.mensagem = "Combo por partes ja iniciado! Responda a etapa atual primeiro."
+            self.cor_mensagem = COR_ERRO
+            self.tempo_msg = 150
+            return
         self.challenge = self._gerar_challenge_partes()
         self.mensagem = "Combo por partes iniciado."
         self.cor_mensagem = COR_OURO
@@ -590,6 +631,10 @@ class CombatScene:
         while rodando:
             self.clock.tick(FPS)
             self._atualizar_efeitos()
+
+            # Detectar aceleração para overlay final (SHIFT)
+            teclas = pygame.key.get_pressed()
+            self.final_scroll_vel = self.final_scroll_vel_base * 2.5 if teclas[pygame.K_LSHIFT] or teclas[pygame.K_RSHIFT] else self.final_scroll_vel_base
 
             for evento in pygame.event.get():
                 if evento.type == pygame.QUIT:
@@ -763,8 +808,19 @@ class CombatScene:
     def _desenhar_overlay_derrota(self):
         self.tela.blit(self.overlay_derrota, (0, 0))
         self._desenhar_texto_centralizado("HEROI DERROTADO!", self.fonte_titulo, COR_ERRO, 210)
-        self._desenhar_texto_centralizado("Nao desista! A pratica leva a perfeicao.", self.fonte_grande, COR_OURO, 260)
-        self._desenhar_texto_centralizado("Pressione qualquer tecla para recomecar...", self.fonte_media, COR_TEXTO_DIM, 310)
+        if self.motivo_derrota:
+            linhas_motivo = self._quebrar_texto(f"Motivo: {self.motivo_derrota}", self.fonte_media, 760)
+            for i, linha in enumerate(linhas_motivo[:2]):
+                self._desenhar_texto_centralizado(linha, self.fonte_media, COR_OURO, 258 + i * 24)
+        else:
+            self._desenhar_texto_centralizado("Nao desista! A pratica leva a perfeicao.", self.fonte_grande, COR_OURO, 260)
+
+        if self.dica_derrota:
+            linhas_dica = self._quebrar_texto(f"Dica: {self.dica_derrota}", self.fonte_pequena, 760)
+            for i, linha in enumerate(linhas_dica[:2]):
+                self._desenhar_texto_centralizado(linha, self.fonte_pequena, COR_TEXTO, 315 + i * 20)
+
+        self._desenhar_texto_centralizado("Pressione qualquer tecla para recomecar...", self.fonte_media, COR_TEXTO_DIM, 365)
 
     def _desenhar_overlay_final(self):
         self.tela.fill((4, 6, 16))
@@ -784,7 +840,7 @@ class CombatScene:
         if self.final_reveladas >= len(self.final_linhas):
             y_ultima = inicio_y + (len(self.final_linhas) - 1) * 44 - scroll
             if ALTURA // 2 - 50 <= y_ultima <= ALTURA // 2 + 50:
-                aviso = self.fonte_pequena.render("Pressione qualquer tecla para sair.", True, COR_TEXTO_DIM)
+                aviso = self.fonte_pequena.render("Qualquer tecla para sair | SHIFT para acelerar", True, COR_TEXTO_DIM)
                 self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 30))
 
     def _desenhar_estrelas_final(self):
@@ -877,7 +933,7 @@ class IntroScene:
             if self.reveladas >= len(self.linhas):
                 y_ultima = inicio_y + (len(self.linhas) - 1) * 44 - scroll
                 if y_ultima <= ALTURA * 0.75:
-                    aviso = self.fonte_rodape.render("ENTER/ESPACO para iniciar a batalha", True, COR_TEXTO_DIM)
+                    aviso = self.fonte_rodape.render("ENTER/ESPACO para iniciar | SHIFT para acelerar", True, COR_TEXTO_DIM)
                     self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 32))
 
             pygame.display.flip()
@@ -932,6 +988,7 @@ class CapituloSubstituicao:
         self.reveladas = 0
         self.reveal_interval = 35
         self.scroll_vel = 0.6
+        self.scroll_vel_base = 0.6
         self.horizonte_y = 130
 
     def rodar(self):
@@ -939,6 +996,10 @@ class CapituloSubstituicao:
         while rodando:
             self.clock.tick(FPS)
             self.frames += 1
+
+            # Detectar aceleração (SHIFT)
+            teclas = pygame.key.get_pressed()
+            self.scroll_vel = self.scroll_vel_base * 2.5 if teclas[pygame.K_LSHIFT] or teclas[pygame.K_RSHIFT] else self.scroll_vel_base
 
             if self.reveladas < len(self.linhas) and self.frames % self.reveal_interval == 0:
                 self.reveladas += 1
@@ -970,7 +1031,7 @@ class CapituloSubstituicao:
             if self.reveladas >= len(self.linhas):
                 y_ultima = inicio_y + (len(self.linhas) - 1) * 44 - scroll
                 if y_ultima <= ALTURA * 0.75:
-                    aviso = self.fonte_rodape.render("ENTER/ESPACO para continuar", True, COR_TEXTO_DIM)
+                    aviso = self.fonte_rodape.render("ENTER/ESPACO para continuar | SHIFT para acelerar", True, COR_TEXTO_DIM)
                     self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 32))
 
             pygame.display.flip()
@@ -1024,6 +1085,7 @@ class CapituloPartes:
         self.reveladas = 0
         self.reveal_interval = 35
         self.scroll_vel = 0.6
+        self.scroll_vel_base = 0.6
         self.horizonte_y = 130
 
     def rodar(self):
@@ -1031,6 +1093,10 @@ class CapituloPartes:
         while rodando:
             self.clock.tick(FPS)
             self.frames += 1
+
+            # Detectar aceleração (SHIFT)
+            teclas = pygame.key.get_pressed()
+            self.scroll_vel = self.scroll_vel_base * 2.5 if teclas[pygame.K_LSHIFT] or teclas[pygame.K_RSHIFT] else self.scroll_vel_base
 
             if self.reveladas < len(self.linhas) and self.frames % self.reveal_interval == 0:
                 self.reveladas += 1
@@ -1062,7 +1128,7 @@ class CapituloPartes:
             if self.reveladas >= len(self.linhas):
                 y_ultima = inicio_y + (len(self.linhas) - 1) * 44 - scroll
                 if y_ultima <= ALTURA * 0.75:
-                    aviso = self.fonte_rodape.render("ENTER/ESPACO para continuar", True, COR_TEXTO_DIM)
+                    aviso = self.fonte_rodape.render("ENTER/ESPACO para continuar | SHIFT para acelerar", True, COR_TEXTO_DIM)
                     self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 32))
 
             pygame.display.flip()
