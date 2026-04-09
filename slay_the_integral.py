@@ -1,12 +1,18 @@
 import random
+import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import pygame
 
-LARGURA, ALTURA = 980, 640
+LARGURA, ALTURA = 1920, 1080
+LARGURA_BASE, ALTURA_BASE = 1920, 1080
+LARGURA_JANELA, ALTURA_JANELA = 1280, 720
 FPS = 50
 SALAS_ATE_BOSS = 5
+Q_USOS_MAX = 2
+Q_COOLDOWN_ACERTOS = 3
 
 COR_FUNDO = (15, 20, 40)
 COR_PAINEL = (25, 32, 58)
@@ -25,6 +31,11 @@ COR_TEXTO_DIM = (130, 150, 200)
 COR_ACERTO = (80, 255, 150)
 COR_ERRO = (255, 110, 80)
 COR_OURO = (255, 200, 50)
+
+PASTA_SPRITES = Path(__file__).resolve().parent / "assets" / "sprites"
+PASTA_MUSICAS = Path(__file__).resolve().parent / "assets" / "musicas"
+PASTA_BACKGROUNDS = Path(__file__).resolve().parent / "assets" / "backgrounds"
+TAMANHO_SPRITE = (110, 145)
 
 
 @dataclass
@@ -197,27 +208,273 @@ def desenhar_barra_vida(tela, rect: pygame.Rect, hp: int, hp_max: int, label: st
     pygame.draw.rect(tela, COR_BORDA, rect, 2, border_radius=6)
 
     txt = fonte.render(f"{label}: {hp}/{hp_max} HP", True, COR_TEXTO)
-    tela.blit(txt, (bx, by - 20))
+    tela.blit(txt, (bx, by - txt.get_height() - 3))
+
+
+def carregar_frames_sprite(nome_base: str, tamanho: tuple[int, int]) -> list[pygame.Surface]:
+    frames: list[pygame.Surface] = []
+
+    pasta_anim = PASTA_SPRITES / nome_base
+    extensoes = ("*.png", "*.jpg", "*.jpeg", "*.webp")
+
+    if pasta_anim.is_dir():
+        for padrao in extensoes:
+            for arquivo in sorted(pasta_anim.glob(padrao)):
+                try:
+                    img = pygame.image.load(str(arquivo)).convert_alpha()
+                    frames.append(pygame.transform.smoothscale(img, tamanho))
+                except Exception:
+                    continue
+        return frames
+
+    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+        arquivo = PASTA_SPRITES / f"{nome_base}{ext}"
+        if not arquivo.exists():
+            continue
+        try:
+            img = pygame.image.load(str(arquivo)).convert_alpha()
+            frames.append(pygame.transform.smoothscale(img, tamanho))
+            break
+        except Exception:
+            continue
+
+    return frames
+
+
+def _carregar_imagem(path: Path) -> pygame.Surface | None:
+    try:
+        return pygame.image.load(str(path)).convert_alpha()
+    except Exception:
+        return None
+
+
+def _fatiar_spritesheet_horizontal(
+    sheet: pygame.Surface,
+    tamanho_destino: tuple[int, int],
+    total_frames: int | None = None,
+) -> list[pygame.Surface]:
+    largura, altura = sheet.get_size()
+    if largura <= 0 or altura <= 0:
+        return []
+
+    if total_frames is not None and total_frames > 0 and largura >= total_frames:
+        frame_w = largura // total_frames
+        qtd = total_frames
+    else:
+        razao_destino = tamanho_destino[0] / max(1, tamanho_destino[1])
+        frame_w_estimado = max(1, int(round(altura * razao_destino)))
+        qtd = max(1, largura // frame_w_estimado)
+        frame_w = largura // qtd
+
+    frames: list[pygame.Surface] = []
+    for i in range(qtd):
+        x = i * frame_w
+        if x + frame_w > largura:
+            break
+        frame = pygame.Surface((frame_w, altura), pygame.SRCALPHA)
+        frame.blit(sheet, (0, 0), pygame.Rect(x, 0, frame_w, altura))
+        frames.append(pygame.transform.smoothscale(frame, tamanho_destino))
+
+    return frames
+
+
+def carregar_frames_spritesheet_horizontal(
+    nome_base: str,
+    tamanho: tuple[int, int],
+    total_frames: int | None = None,
+) -> list[pygame.Surface]:
+    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+        arquivo = PASTA_SPRITES / f"{nome_base}{ext}"
+        if not arquivo.exists():
+            continue
+
+        img = _carregar_imagem(arquivo)
+        if img is None:
+            continue
+
+        return _fatiar_spritesheet_horizontal(img, tamanho, total_frames)
+
+    return []
+
+
+def _extrair_total_frames_do_nome(nome_base: str) -> int | None:
+    # Ex.: parado_spritesheet_8 -> 8 frames
+    m = re.search(r"_(\d+)$", nome_base)
+    if not m:
+        return None
+    try:
+        return max(1, int(m.group(1)))
+    except Exception:
+        return None
+
+
+def carregar_animacoes_sprite(nome_personagem: str, tamanho: tuple[int, int]) -> dict[str, list[pygame.Surface]]:
+    animacoes: dict[str, list[pygame.Surface]] = {}
+
+    estados = {
+        "parado": ("parado", "idle"),
+        "ataque": ("ataque", "attack"),
+    }
+
+    for estado, aliases in estados.items():
+        frames: list[pygame.Surface] = []
+
+        # 1) Prioridade: spritesheet horizontal por estado.
+        # Exemplos aceitos:
+        # assets/sprites/heroi/parado_spritesheet.png
+        # assets/sprites/heroi/parado_sheet.png
+        # assets/sprites/heroi/parado_spritesheet_8.png  (8 frames)
+        for alias in aliases:
+            for nome_sheet in (
+                f"{nome_personagem}/{alias}_spritesheet",
+                f"{nome_personagem}/{alias}_sheet",
+                f"{nome_personagem}/{alias}",
+            ):
+                total = _extrair_total_frames_do_nome(nome_sheet)
+                frames = carregar_frames_spritesheet_horizontal(nome_sheet, tamanho, total_frames=total)
+                if frames:
+                    break
+            if frames:
+                break
+
+            # Permite sufixo de quantidade de frames no nome.
+            base_dir = PASTA_SPRITES / nome_personagem
+            if base_dir.is_dir():
+                for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+                    for arquivo in sorted(base_dir.glob(f"{alias}_spritesheet_*" + ext[1:])):
+                        stem = arquivo.stem
+                        total = _extrair_total_frames_do_nome(f"{nome_personagem}/{stem}")
+                        img = _carregar_imagem(arquivo)
+                        if img is None:
+                            continue
+                        frames = _fatiar_spritesheet_horizontal(img, tamanho, total_frames=total)
+                        if frames:
+                            break
+                    if frames:
+                        break
+            if frames:
+                break
+
+        # 2) Fallback: sequência em pasta (parado/ataque) ou imagem única.
+        if not frames:
+            for alias in aliases:
+                frames = carregar_frames_sprite(f"{nome_personagem}/{alias}", tamanho)
+                if frames:
+                    break
+
+        # 3) Compatibilidade com estrutura antiga (sem estados).
+        if not frames and estado == "parado":
+            frames = carregar_frames_sprite(nome_personagem, tamanho)
+
+        animacoes[estado] = frames
+
+    if not animacoes["parado"] and animacoes["ataque"]:
+        animacoes["parado"] = animacoes["ataque"]
+    if not animacoes["ataque"] and animacoes["parado"]:
+        animacoes["ataque"] = animacoes["parado"]
+
+    return animacoes
+
+
+def espelhar_animacoes_horizontais(animacoes: dict[str, list[pygame.Surface]]) -> dict[str, list[pygame.Surface]]:
+    espelhadas: dict[str, list[pygame.Surface]] = {}
+    for estado, frames in animacoes.items():
+        espelhadas[estado] = [pygame.transform.flip(frame, True, False) for frame in frames]
+    return espelhadas
+
+
+def encontrar_arquivo_audio(nome_base: str) -> Path | None:
+    for ext in (".ogg", ".mp3", ".wav"):
+        caminho = PASTA_MUSICAS / f"{nome_base}{ext}"
+        if caminho.exists():
+            return caminho
+    return None
+
+
+class AudioManager:
+
+    def __init__(self):
+        self.ativo = False
+        self.faixa_atual = ""
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            self.ativo = True
+        except Exception:
+            self.ativo = False
+
+    def tocar(self, faixa: str):
+        if not self.ativo:
+            return
+        if faixa == self.faixa_atual:
+            return
+
+        caminho = encontrar_arquivo_audio(faixa)
+        if caminho is None:
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+            self.faixa_atual = ""
+            return
+
+        try:
+            pygame.mixer.music.load(str(caminho))
+            pygame.mixer.music.play(-1)
+            self.faixa_atual = faixa
+        except Exception:
+            self.faixa_atual = ""
+
+
+def carregar_imagem_background(nome_base: str) -> pygame.Surface | None:
+    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+        caminho = PASTA_BACKGROUNDS / f"{nome_base}{ext}"
+        if not caminho.exists():
+            continue
+        try:
+            return pygame.image.load(str(caminho)).convert()
+        except Exception:
+            continue
+    return None
 
 
 class CombatScene:
 
-    def __init__(self, tela, clock):
+    def __init__(self, tela, clock, audio: AudioManager | None = None):
         self.tela = tela
         self.clock = clock
+        self.audio = audio
         self.math = MathEngine()
+        self.layout_janela = LARGURA < 1700 or ALTURA < 900
+        self.ui_scale = min(1.08, min(LARGURA / 980, ALTURA / 640))
+        self.fonte_mult = 1.95 if not self.layout_janela else 1.2
+        self.fonte_hp_mult = 1.6 if not self.layout_janela else 1.2
 
-        self.fonte_titulo = pygame.font.SysFont("consolas", 28, bold=True)
-        self.fonte_grande = pygame.font.SysFont("consolas", 21, bold=True)
-        self.fonte_media = pygame.font.SysFont("consolas", 17)
-        self.fonte_pequena = pygame.font.SysFont("consolas", 14)
+        self.fonte_titulo = pygame.font.SysFont("consolas", int(max(28, int(28 * self.ui_scale * 0.85)) * self.fonte_mult), bold=True)
+        self.fonte_grande = pygame.font.SysFont("consolas", int(max(21, int(21 * self.ui_scale * 0.9)) * self.fonte_mult), bold=True)
+        self.fonte_media = pygame.font.SysFont("consolas", int(max(17, int(17 * self.ui_scale * 0.95)) * self.fonte_mult))
+        self.fonte_pequena = pygame.font.SysFont("consolas", int(max(14, int(14 * self.ui_scale)) * self.fonte_mult))
+        self.fonte_hp = pygame.font.SysFont("consolas", int(max(14, int(14 * self.ui_scale)) * self.fonte_hp_mult))
 
         self.overlay_vitoria = self._criar_overlay((10, 30, 10, 180))
         self.overlay_derrota = self._criar_overlay((30, 5, 5, 190))
         self.overlay_final = self._criar_overlay((20, 20, 0, 200))
+        self.fundo_batalha_img = carregar_imagem_background("batalha")
 
-        self.input_rect = pygame.Rect(250, 520, 480, 44)
+        self.painel_margin_x = max(34, int(LARGURA * 0.035))
+        self.painel_y = int(ALTURA * (0.50 if not self.layout_janela else 0.44))
+        self.painel_h = ALTURA - self.painel_y - 26
+        self.painel_w = LARGURA - self.painel_margin_x * 2
+
+        input_w = min(int(760 * self.ui_scale * 0.75), self.painel_w - 220)
+        input_h = max(44, int(46 * self.ui_scale * 0.9))
+        input_x = LARGURA // 2 - input_w // 2
+        input_y = self.painel_y + self.painel_h - input_h - 16
+        self.input_rect = pygame.Rect(input_x, input_y, input_w, input_h)
         self.input_field = InputField(self.input_rect, self.fonte_grande)
+        btn_w = max(260, int(300 * self.ui_scale))
+        btn_h = max(56, int(64 * self.ui_scale))
+        self.btn_prosseguir_rect = pygame.Rect(LARGURA // 2 - btn_w // 2, int(ALTURA * 0.62), btn_w, btn_h)
 
         self.player = Player(100)
         self.sala_atual = 1
@@ -234,9 +491,9 @@ class CombatScene:
 
         self.final_frames = 0
         self.final_reveladas = 0
-        self.final_reveal_interval = 50
-        self.final_scroll_vel = 0.45
-        self.final_scroll_vel_base = 0.45
+        self.final_reveal_interval = 24
+        self.final_scroll_vel = 1.05
+        self.final_scroll_vel_base = 1.05
         self.final_horizonte_y = 130
         self.final_linhas = [
             "Depois de varias batalhas arduas no reino do calculo...",
@@ -251,6 +508,11 @@ class CombatScene:
             for _ in range(120)
         ]
         self.efeitos_ativos: dict[str, int] = {}
+        self.heroi_anim = carregar_animacoes_sprite("heroi", TAMANHO_SPRITE)
+        self.inimigo_anim = espelhar_animacoes_horizontais(carregar_animacoes_sprite("inimigo", TAMANHO_SPRITE))
+        self.boss_anim = espelhar_animacoes_horizontais(carregar_animacoes_sprite("boss", TAMANHO_SPRITE))
+        self.q_usos_restantes = Q_USOS_MAX
+        self.q_cooldown_acertos_restantes = 0
 
     def _criar_overlay(self, cor_rgba):
         overlay = pygame.Surface((LARGURA, ALTURA), pygame.SRCALPHA)
@@ -366,6 +628,7 @@ class CombatScene:
         dano = dano_base + self.sala_atual
         self.player.tomar_dano(dano)
         self.ultimo_dano = dano
+        self._ativar_efeito("ataque_inimigo", 14)
 
     def _registrar_derrota_se_necessario(self, motivo: str, dica: str):
         if not self.player.vivo:
@@ -376,6 +639,7 @@ class CombatScene:
         dano_real = max(1, dano - self.enemy.armor)
         self.enemy.tomar_dano(dano_real)
         self.ultimo_dano = dano_real
+        self._ativar_efeito("ataque_heroi", 14)
 
     def _ativar_efeito(self, nome: str, duracao: int):
         self.efeitos_ativos[nome] = duracao
@@ -395,6 +659,40 @@ class CombatScene:
         if "substituicao" in self.efeitos_ativos:
             return random.randint(-5, 5), random.randint(-3, 3)
         return 0, 0
+
+    def _obter_frame_sprite(self, frames: list[pygame.Surface]) -> pygame.Surface | None:
+        if not frames:
+            return None
+        idx = (pygame.time.get_ticks() // 120) % len(frames)
+        return frames[idx]
+
+    def _q_disponivel(self) -> bool:
+        return self.q_cooldown_acertos_restantes <= 0 and self.q_usos_restantes > 0
+
+    def _consumir_uso_q(self) -> bool:
+        if not self._q_disponivel():
+            return False
+
+        self.q_usos_restantes = max(0, self.q_usos_restantes - 1)
+        ativou_cooldown = self.q_usos_restantes == 0
+        if ativou_cooldown:
+            self.q_cooldown_acertos_restantes = Q_COOLDOWN_ACERTOS
+            if self.player.arma_idx == 0:
+                self.player.arma_idx = 1
+        return ativou_cooldown
+
+    def _progredir_cooldown_q(self, ataque_arma_nao_q_acertou: bool):
+        if self.q_cooldown_acertos_restantes <= 0:
+            return
+        if not ataque_arma_nao_q_acertou:
+            return
+
+        self.q_cooldown_acertos_restantes = max(0, self.q_cooldown_acertos_restantes - 1)
+        if self.q_cooldown_acertos_restantes == 0:
+            self.q_usos_restantes = Q_USOS_MAX
+            self.mensagem = f"Lamina Q recarregada! Usos disponiveis: {self.q_usos_restantes}."
+            self.cor_mensagem = COR_OURO
+            self.tempo_msg = max(self.tempo_msg, 130)
 
     def _desenhar_efeitos(self, ix: int, iy: int):
         if "lamina" in self.efeitos_ativos:
@@ -424,6 +722,7 @@ class CombatScene:
     def _avaliar_resposta(self):
         valor = self.math.parsear_digitos(self.input_field.texto)
         self.input_field.limpar()
+        ataque_arma_nao_q_acertou = False
 
         if valor is None:
             self.mensagem = "Resposta invalida. Use apenas digitos."
@@ -448,7 +747,12 @@ class CombatScene:
                 )
                 self.mensagem = "Coleta errada: quantidade incorreta de energia."
                 self.cor_mensagem = COR_ERRO
-            self.tempo_msg = 190
+
+            if self._consumir_uso_q():
+                self.mensagem += " Lamina em cooldown: acerte W/E para recarregar."
+                self.tempo_msg = 220
+            else:
+                self.tempo_msg = 190
 
         elif ch.tipo == "substituicao":
             if valor == ch.resposta:
@@ -510,6 +814,7 @@ class CombatScene:
                     self._ativar_efeito("foice", 10)
                 else:
                     self._ativar_efeito("canhao", 12)
+                ataque_arma_nao_q_acertou = True
                 self.mensagem = f"Acertou! {self.ultimo_dano} de dano."
                 self.cor_mensagem = COR_ACERTO
                 self.tempo_msg = 180
@@ -540,6 +845,8 @@ class CombatScene:
             self.estado = "derrota"
             return
 
+        self._progredir_cooldown_q(ataque_arma_nao_q_acertou)
+
         self.challenge = self._gerar_challenge_por_arma()
 
     def _avancar_sala(self):
@@ -550,6 +857,8 @@ class CombatScene:
         self.sala_atual += 1
         metodos_desbloqueados = self._desbloquear_metodos()
         self.enemy = self._gerar_inimigo_da_sala()
+        self.q_usos_restantes = Q_USOS_MAX
+        self.q_cooldown_acertos_restantes = 0
         self.challenge = self._gerar_challenge_por_arma()
         self.estado = "combate"
         self.mensagem = f"Sala {self.sala_atual}! Novo desafio encontrado."
@@ -557,16 +866,18 @@ class CombatScene:
         self.tempo_msg = 180
         
         if metodos_desbloqueados == "substituicao":
-            cap_sub = CapituloSubstituicao(self.tela, self.clock)
+            cap_sub = CapituloSubstituicao(self.tela, self.clock, self.audio)
             cap_sub.rodar()
         elif metodos_desbloqueados == "partes":
-            cap_partes = CapituloPartes(self.tela, self.clock)
+            cap_partes = CapituloPartes(self.tela, self.clock, self.audio)
             cap_partes.rodar()
 
     def reiniciar_partida(self):
         self.player = Player(100)
         self.sala_atual = 1
         self.enemy = self._gerar_inimigo_da_sala()
+        self.q_usos_restantes = Q_USOS_MAX
+        self.q_cooldown_acertos_restantes = 0
         self.challenge = self._gerar_challenge_por_arma()
         self.estado = "combate"
         self.mensagem = "Nova partida iniciada."
@@ -575,10 +886,16 @@ class CombatScene:
         self.ultimo_dano = 0
         self.motivo_derrota = ""
         self.dica_derrota = ""
+        self.efeitos_ativos.clear()
         self.input_field.limpar()
 
     def _selecionar_arma(self, idx: int):
         if 0 <= idx < len(self.player.armas):
+            if idx == 0 and not self._q_disponivel():
+                self.mensagem = f"Lamina Q em cooldown. Acerte W/E por mais {self.q_cooldown_acertos_restantes} vez(es)."
+                self.cor_mensagem = COR_ERRO
+                self.tempo_msg = 150
+                return
             self.player.arma_idx = idx
             self.enemy.partes_etapa = 0
             self.challenge = self._gerar_challenge_por_arma()
@@ -618,7 +935,8 @@ class CombatScene:
         self.mensagem = "DEV: fase concluida com sucesso."
         self.cor_mensagem = COR_ACERTO
         self.tempo_msg = 120
-        self._avancar_sala()
+        self.ultimo_dano = 0
+        self.estado = "vitoria"
 
     def _atalho_dev_finalizar(self):
         self.estado = "fim"
@@ -628,13 +946,20 @@ class CombatScene:
 
     def rodar(self):
         rodando = True
+        resultado = "sair"
         while rodando:
             self.clock.tick(FPS)
             self._atualizar_efeitos()
+            mouse = pygame.mouse.get_pos()
+            if self.audio is not None:
+                if self.estado == "fim":
+                    self.audio.tocar("cutscene")
+                elif self.estado == "vitoria":
+                    self.audio.tocar("vitoria_sala")
+                else:
+                    self.audio.tocar("batalha")
 
-            # Detectar aceleração para overlay final (SHIFT)
-            teclas = pygame.key.get_pressed()
-            self.final_scroll_vel = self.final_scroll_vel_base * 2.5 if teclas[pygame.K_LSHIFT] or teclas[pygame.K_RSHIFT] else self.final_scroll_vel_base
+            self.final_scroll_vel = self.final_scroll_vel_base
 
             for evento in pygame.event.get():
                 if evento.type == pygame.QUIT:
@@ -662,14 +987,24 @@ class CombatScene:
                         if acao == "submit" and self.input_field.texto.strip():
                             self._avaliar_resposta()
 
+                elif self.estado == "vitoria" and evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1:
+                    if self.btn_prosseguir_rect.collidepoint(mouse):
+                        self._avancar_sala()
+
                 elif self.estado in ("vitoria", "derrota", "fim") and evento.type == pygame.KEYDOWN:
                     if self.estado == "vitoria":
-                        self._avancar_sala()
+                        if evento.key in (pygame.K_SPACE, pygame.K_RETURN):
+                            self._avancar_sala()
                     elif self.estado == "derrota":
-                        self.reiniciar_partida()
+                        resultado = "menu"
+                        rodando = False
                     else:
-                        if self.final_reveladas >= len(self.final_linhas):
-                            rodando = False
+                        if evento.key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_ESCAPE):
+                            if self.final_reveladas < len(self.final_linhas):
+                                self.final_reveladas = len(self.final_linhas)
+                            else:
+                                resultado = "vitoria_final"
+                                rodando = False
 
             if self.tempo_msg > 0:
                 self.tempo_msg -= 1
@@ -693,9 +1028,7 @@ class CombatScene:
                 self._desenhar_overlay_final()
 
             pygame.display.flip()
-
-        pygame.quit()
-        sys.exit()
+        return resultado
 
     def _desenhar_combate(self):
         titulo = self.fonte_titulo.render(
@@ -703,75 +1036,121 @@ class CombatScene:
             True,
             COR_OURO,
         )
-        self.tela.blit(titulo, (LARGURA // 2 - titulo.get_width() // 2, 14))
+        self.tela.blit(titulo, (LARGURA // 2 - titulo.get_width() // 2, int(14 * self.ui_scale)))
 
-        hx, hy = 70, 160
-        pygame.draw.rect(self.tela, COR_HEROI, (hx, hy, 110, 145), border_radius=8)
-        pygame.draw.rect(self.tela, (150, 220, 255), (hx, hy, 110, 145), 3, border_radius=8)
-        label_h = self.fonte_media.render("HEROI", True, COR_HEROI)
-        self.tela.blit(label_h, (hx + 55 - label_h.get_width() // 2, hy + 52))
-        self.tela.blit(self.fonte_grande.render("[H]", True, (200, 240, 255)), (hx + 37, hy + 78))
+        area_batalha_y = int(78 * self.ui_scale)
+        area_batalha_h = max(120, self.painel_y - area_batalha_y - 10)
+        area_batalha = pygame.Rect(0, area_batalha_y, LARGURA, area_batalha_h)
+        if self.fundo_batalha_img is not None:
+            bg = pygame.transform.smoothscale(self.fundo_batalha_img, (area_batalha.width, area_batalha.height))
+            self.tela.blit(bg, area_batalha.topleft)
+            sombra = pygame.Surface((area_batalha.width, area_batalha.height), pygame.SRCALPHA)
+            sombra.fill((0, 0, 0, 70))
+            self.tela.blit(sombra, area_batalha.topleft)
+
+        hx, hy = int(LARGURA * 0.12) - TAMANHO_SPRITE[0] // 2, int(ALTURA * 0.26)
+        estado_heroi = "ataque" if "ataque_heroi" in self.efeitos_ativos else "parado"
+        sprite_heroi = self._obter_frame_sprite(self.heroi_anim.get(estado_heroi, []))
+        if sprite_heroi is not None:
+            self.tela.blit(sprite_heroi, (hx, hy))
+        else:
+            pygame.draw.rect(self.tela, COR_HEROI, (hx, hy, 110, 145), border_radius=8)
+            pygame.draw.rect(self.tela, (150, 220, 255), (hx, hy, 110, 145), 3, border_radius=8)
+            label_h = self.fonte_media.render("HEROI", True, COR_HEROI)
+            self.tela.blit(label_h, (hx + 55 - label_h.get_width() // 2, hy + 52))
+            self.tela.blit(self.fonte_grande.render("[H]", True, (200, 240, 255)), (hx + 37, hy + 78))
 
         cor_inimigo = COR_BOSS if self.enemy.boss else COR_INIMIGO
-        ix_base, iy_base = 800, 160
+        ix_base, iy_base = int(LARGURA * 0.88) - TAMANHO_SPRITE[0] // 2, int(ALTURA * 0.26)
         dx, dy = self._offset_inimigo()
         ix, iy = ix_base + dx, iy_base + dy
-        pygame.draw.rect(self.tela, cor_inimigo, (ix, iy, 110, 145), border_radius=8)
-        pygame.draw.rect(self.tela, (255, 170, 120), (ix, iy, 110, 145), 3, border_radius=8)
-        nome_i = "BOSS" if self.enemy.boss else "INIMIGO"
-        label_i = self.fonte_media.render(nome_i, True, cor_inimigo)
-        self.tela.blit(label_i, (ix + 55 - label_i.get_width() // 2, iy + 52))
-        self.tela.blit(self.fonte_grande.render("[I]", True, (255, 200, 160)), (ix + 37, iy + 78))
+        estado_inimigo = "ataque" if "ataque_inimigo" in self.efeitos_ativos else "parado"
+        anim_inimigo = self.boss_anim if self.enemy.boss else self.inimigo_anim
+        sprite_inimigo = self._obter_frame_sprite(anim_inimigo.get(estado_inimigo, []))
+        if sprite_inimigo is not None:
+            self.tela.blit(sprite_inimigo, (ix, iy))
+        else:
+            pygame.draw.rect(self.tela, cor_inimigo, (ix, iy, 110, 145), border_radius=8)
+            pygame.draw.rect(self.tela, (255, 170, 120), (ix, iy, 110, 145), 3, border_radius=8)
+            nome_i = "BOSS" if self.enemy.boss else "INIMIGO"
+            label_i = self.fonte_media.render(nome_i, True, cor_inimigo)
+            self.tela.blit(label_i, (ix + 55 - label_i.get_width() // 2, iy + 52))
+            self.tela.blit(self.fonte_grande.render("[I]", True, (255, 200, 160)), (ix + 37, iy + 78))
         self._desenhar_efeitos(ix, iy)
 
-        desenhar_barra_vida(self.tela, pygame.Rect(65, 125, 180, 14), self.player.hp, self.player.hp_max, "HP Heroi", self.fonte_pequena)
+        desenhar_barra_vida(self.tela, pygame.Rect(hx - 20, hy - 34, 260, 18), self.player.hp, self.player.hp_max, "HP Heroi", self.fonte_hp)
         desenhar_barra_vida(
             self.tela,
-            pygame.Rect(740, 125, 210, 14),
+            pygame.Rect(ix - 35, iy - 34, 290, 18),
             self.enemy.hp,
             self.enemy.hp_max,
             "HP Inimigo",
-            self.fonte_pequena,
+            self.fonte_hp,
         )
 
         armadura_txt = self.fonte_pequena.render(f"Defesa inimiga: {self.enemy.armor}", True, COR_TEXTO_DIM)
-        self.tela.blit(armadura_txt, (745, 146))
+        self.tela.blit(armadura_txt, (ix - 30, iy - 6))
 
-        painel_y = 325
-        pygame.draw.rect(self.tela, COR_PAINEL, (34, painel_y, LARGURA - 68, 282), border_radius=10)
-        pygame.draw.rect(self.tela, COR_BORDA, (34, painel_y, LARGURA - 68, 282), 2, border_radius=10)
+        painel_y = self.painel_y
+        pygame.draw.rect(self.tela, COR_PAINEL, (self.painel_margin_x, painel_y, self.painel_w, self.painel_h), border_radius=10)
+        pygame.draw.rect(self.tela, COR_BORDA, (self.painel_margin_x, painel_y, self.painel_w, self.painel_h), 2, border_radius=10)
 
-        linhas_desafio = self._quebrar_texto(self.challenge.prompt, self.fonte_media, LARGURA - 120)
-        for i, linha in enumerate(linhas_desafio[:3]):
+        texto_x = self.painel_margin_x + 18
+        y = painel_y + 18
+        linha_media = self.fonte_media.get_linesize() + 4
+        linha_peq = self.fonte_pequena.get_linesize() + 3
+
+        linhas_desafio = self._quebrar_texto(self.challenge.prompt, self.fonte_media, self.painel_w - 36)
+        max_linhas_desafio = 3 if not self.layout_janela else 2
+        for i, linha in enumerate(linhas_desafio[:max_linhas_desafio]):
             surf = self.fonte_media.render(linha, True, COR_OURO)
-            self.tela.blit(surf, (50, painel_y + 18 + i * 22))
+            self.tela.blit(surf, (texto_x, y + i * linha_media))
+
+        y += max_linhas_desafio * linha_media + 8
 
         dica = "Dica: definida = F(b)-F(a) | R = Substituicao | T= Integral por partes"
-        self.tela.blit(self.fonte_pequena.render(dica, True, COR_TEXTO_DIM), (50, painel_y + 74))
+        self.tela.blit(self.fonte_pequena.render(dica, True, COR_TEXTO_DIM), (texto_x, y))
+        y += linha_peq + 6
 
         armas = (
             f"Arma atual: {self.player.arma_atual.nome} | "
             "Q-Lamina da Area  W-Foice Primitiva  E-Canhao Definido"
         )
-        self.tela.blit(self.fonte_pequena.render(armas, True, COR_TEXTO), (50, painel_y + 100))
+        self.tela.blit(self.fonte_pequena.render(armas, True, COR_TEXTO), (texto_x, y))
+        y += linha_peq + 4
+
+        if self.q_cooldown_acertos_restantes > 0:
+            status_q = f"Ataque basico Q: COOLDOWN ({self.q_cooldown_acertos_restantes} acerto(s) com W/E)"
+            cor_status_q = COR_ERRO
+        else:
+            status_q = f"Ataque basico Q: {self.q_usos_restantes}/{Q_USOS_MAX} uso(s)"
+            cor_status_q = COR_TEXTO_DIM
+        self.tela.blit(self.fonte_pequena.render(status_q, True, cor_status_q), (texto_x, y))
+        y += linha_peq + 4
 
         met = (
             "Metodos: "
             f"R-Substituicao [{'OK' if self.player.metodos['substituicao'] else 'BLOQ'}] | "
             f"T-Partes [{'OK' if self.player.metodos['partes'] else 'BLOQ'}]"
         )
-        self.tela.blit(self.fonte_pequena.render(met, True, COR_TEXTO), (50, painel_y + 120))
+        self.tela.blit(self.fonte_pequena.render(met, True, COR_TEXTO), (texto_x, y))
+        y += linha_peq + 6
 
         if self.mensagem and self.tempo_msg > 0:
             msg = self.fonte_media.render(self.mensagem, True, self.cor_mensagem)
-            self.tela.blit(msg, (50, painel_y + 148))
-
-        lbl = self.fonte_pequena.render("Resposta numerica (digitos) e ENTER para confirmar:", True, COR_TEXTO_DIM)
-        self.tela.blit(lbl, (self.input_rect.x, self.input_rect.y - 20))
-        self.input_field.desenhar(self.tela)
+            self.tela.blit(msg, (texto_x, min(y, self.input_rect.y - 72)))
 
         ajuda = "ESC: sair | Acertar = dano | Errar = punicao"
-        self.tela.blit(self.fonte_pequena.render(ajuda, True, COR_TEXTO_DIM), (LARGURA // 2 - 170, ALTURA - 24))
+        ajuda_surf = self.fonte_pequena.render(ajuda, True, COR_TEXTO_DIM)
+        ajuda_y = self.painel_y + self.painel_h - ajuda_surf.get_height() - 10
+
+        lbl = self.fonte_pequena.render("Resposta numerica (digitos) e ENTER para confirmar:", True, COR_TEXTO_DIM)
+        novo_input_y = ajuda_y - self.input_rect.height - lbl.get_height() - 14
+        self.input_rect.y = max(self.painel_y + int(170 * self.ui_scale), novo_input_y)
+
+        self.tela.blit(lbl, (LARGURA // 2 - lbl.get_width() // 2, self.input_rect.y - lbl.get_height() - 6))
+        self.input_field.desenhar(self.tela)
+        self.tela.blit(ajuda_surf, (LARGURA // 2 - ajuda_surf.get_width() // 2, ajuda_y))
 
     def _quebrar_texto(self, texto: str, fonte: pygame.font.Font, largura_max: int) -> list[str]:
         palavras = texto.split()
@@ -801,9 +1180,23 @@ class CombatScene:
         self._desenhar_texto_centralizado("INIMIGO DERROTADO!", self.fonte_titulo, COR_ACERTO, 215)
         self._desenhar_texto_centralizado(f"{self.ultimo_dano} de dano!", self.fonte_grande, COR_OURO, 265)
         if self.sala_atual < SALAS_ATE_BOSS:
-            self._desenhar_texto_centralizado("Pressione qualquer tecla para a proxima sala...", self.fonte_media, COR_TEXTO_DIM, 315)
+            self._desenhar_texto_centralizado("Clique em PROSSEGUIR ou pressione ENTER/ESPACO", self.fonte_media, COR_TEXTO_DIM, 315)
         else:
-            self._desenhar_texto_centralizado("Boss integrado por completo!", self.fonte_media, COR_TEXTO_DIM, 315)
+            self._desenhar_texto_centralizado("Boss integrado por completo! Prossiga para o final.", self.fonte_media, COR_TEXTO_DIM, 315)
+
+        hover = self.btn_prosseguir_rect.collidepoint(pygame.mouse.get_pos())
+        cor_fundo = (40, 105, 70) if hover else (28, 84, 54)
+        cor_borda = (120, 220, 160) if hover else (80, 170, 120)
+        pygame.draw.rect(self.tela, cor_fundo, self.btn_prosseguir_rect, border_radius=10)
+        pygame.draw.rect(self.tela, cor_borda, self.btn_prosseguir_rect, 2, border_radius=10)
+        txt_btn = self.fonte_grande.render("PROSSEGUIR", True, (230, 255, 240))
+        self.tela.blit(
+            txt_btn,
+            (
+                self.btn_prosseguir_rect.centerx - txt_btn.get_width() // 2,
+                self.btn_prosseguir_rect.centery - txt_btn.get_height() // 2,
+            ),
+        )
 
     def _desenhar_overlay_derrota(self):
         self.tela.blit(self.overlay_derrota, (0, 0))
@@ -820,7 +1213,7 @@ class CombatScene:
             for i, linha in enumerate(linhas_dica[:2]):
                 self._desenhar_texto_centralizado(linha, self.fonte_pequena, COR_TEXTO, 315 + i * 20)
 
-        self._desenhar_texto_centralizado("Pressione qualquer tecla para recomecar...", self.fonte_media, COR_TEXTO_DIM, 365)
+        self._desenhar_texto_centralizado("ESPACO/ENTER para voltar ao menu...", self.fonte_media, COR_TEXTO_DIM, 365)
 
     def _desenhar_overlay_final(self):
         self.tela.fill((4, 6, 16))
@@ -838,10 +1231,8 @@ class CombatScene:
                 self._desenhar_linha_crawl_final(self.final_linhas[i], y)
 
         if self.final_reveladas >= len(self.final_linhas):
-            y_ultima = inicio_y + (len(self.final_linhas) - 1) * 44 - scroll
-            if ALTURA // 2 - 50 <= y_ultima <= ALTURA // 2 + 50:
-                aviso = self.fonte_pequena.render("Qualquer tecla para sair | SHIFT para acelerar", True, COR_TEXTO_DIM)
-                self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 30))
+            aviso = self.fonte_pequena.render("ESPACO/ENTER para prosseguir", True, COR_TEXTO_DIM)
+            self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - aviso.get_height() - 10))
 
     def _desenhar_estrelas_final(self):
         for x, y, brilho in self.final_estrelas:
@@ -868,12 +1259,14 @@ class CombatScene:
 
 class IntroScene:
 
-    def __init__(self, tela, clock):
+    def __init__(self, tela, clock, audio: AudioManager | None = None):
         self.tela = tela
         self.clock = clock
-        self.fonte_titulo = pygame.font.SysFont("consolas", 34, bold=True)
-        self.fonte_texto = pygame.font.SysFont("consolas", 22, bold=True)
-        self.fonte_rodape = pygame.font.SysFont("consolas", 16)
+        self.audio = audio
+        self.ui_scale = min(LARGURA / 980, ALTURA / 640)
+        self.fonte_titulo = pygame.font.SysFont("consolas", max(34, int(34 * self.ui_scale * 0.9)), bold=True)
+        self.fonte_texto = pygame.font.SysFont("consolas", max(22, int(22 * self.ui_scale * 0.9)), bold=True)
+        self.fonte_rodape = pygame.font.SysFont("consolas", max(16, int(16 * self.ui_scale)))
 
         self.linhas = [
             "Em um reino onde numeros moldam o destino...",
@@ -893,12 +1286,14 @@ class IntroScene:
 
         self.frames = 0
         self.reveladas = 0
-        self.reveal_interval = 50
-        self.scroll_vel = 0.45
+        self.reveal_interval = 24
+        self.scroll_vel = 1.0
         self.horizonte_y = 130
 
     def rodar(self):
         rodando = True
+        if self.audio is not None:
+            self.audio.tocar("cutscene")
         while rodando:
             self.clock.tick(FPS)
             self.frames += 1
@@ -911,10 +1306,10 @@ class IntroScene:
                     pygame.quit()
                     sys.exit()
                 if evento.type == pygame.KEYDOWN and evento.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE):
-                    if self.reveladas >= len(self.linhas):
-                        y_ultima = ALTURA + 40 + (len(self.linhas) - 1) * 44 - self.frames * self.scroll_vel
-                        if y_ultima <= ALTURA * 0.75:
-                            rodando = False
+                    if self.reveladas < len(self.linhas):
+                        self.reveladas = len(self.linhas)
+                    else:
+                        rodando = False
 
             self.tela.fill((4, 6, 16))
             self._desenhar_estrelas()
@@ -931,10 +1326,8 @@ class IntroScene:
                     self._desenhar_linha_crawl(self.linhas[i], y)
 
             if self.reveladas >= len(self.linhas):
-                y_ultima = inicio_y + (len(self.linhas) - 1) * 44 - scroll
-                if y_ultima <= ALTURA * 0.75:
-                    aviso = self.fonte_rodape.render("ENTER/ESPACO para iniciar | SHIFT para acelerar", True, COR_TEXTO_DIM)
-                    self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 32))
+                aviso = self.fonte_rodape.render("ENTER/ESPACO para prosseguir", True, COR_TEXTO_DIM)
+                self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - aviso.get_height() - 12))
 
             pygame.display.flip()
 
@@ -964,12 +1357,14 @@ class IntroScene:
 
 class CapituloSubstituicao:
 
-    def __init__(self, tela, clock):
+    def __init__(self, tela, clock, audio: AudioManager | None = None):
         self.tela = tela
         self.clock = clock
-        self.fonte_titulo = pygame.font.SysFont("consolas", 34, bold=True)
-        self.fonte_texto = pygame.font.SysFont("consolas", 22, bold=True)
-        self.fonte_rodape = pygame.font.SysFont("consolas", 16)
+        self.audio = audio
+        self.ui_scale = min(LARGURA / 980, ALTURA / 640)
+        self.fonte_titulo = pygame.font.SysFont("consolas", max(34, int(34 * self.ui_scale * 0.9)), bold=True)
+        self.fonte_texto = pygame.font.SysFont("consolas", max(22, int(22 * self.ui_scale * 0.9)), bold=True)
+        self.fonte_rodape = pygame.font.SysFont("consolas", max(16, int(16 * self.ui_scale)))
 
         self.linhas = [
             "Uma nova tecnica revela-se ao heroi...",
@@ -986,20 +1381,17 @@ class CapituloSubstituicao:
 
         self.frames = 0
         self.reveladas = 0
-        self.reveal_interval = 35
-        self.scroll_vel = 0.6
-        self.scroll_vel_base = 0.6
+        self.reveal_interval = 20
+        self.scroll_vel = 1.05
         self.horizonte_y = 130
 
     def rodar(self):
         rodando = True
+        if self.audio is not None:
+            self.audio.tocar("cutscene")
         while rodando:
             self.clock.tick(FPS)
             self.frames += 1
-
-            # Detectar aceleração (SHIFT)
-            teclas = pygame.key.get_pressed()
-            self.scroll_vel = self.scroll_vel_base * 2.5 if teclas[pygame.K_LSHIFT] or teclas[pygame.K_RSHIFT] else self.scroll_vel_base
 
             if self.reveladas < len(self.linhas) and self.frames % self.reveal_interval == 0:
                 self.reveladas += 1
@@ -1009,10 +1401,10 @@ class CapituloSubstituicao:
                     pygame.quit()
                     sys.exit()
                 if evento.type == pygame.KEYDOWN and evento.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE):
-                    if self.reveladas >= len(self.linhas):
-                        y_ultima = ALTURA + 40 + (len(self.linhas) - 1) * 44 - self.frames * self.scroll_vel
-                        if y_ultima <= ALTURA * 0.75:
-                            rodando = False
+                    if self.reveladas < len(self.linhas):
+                        self.reveladas = len(self.linhas)
+                    else:
+                        rodando = False
 
             self.tela.fill((4, 6, 16))
             self._desenhar_estrelas()
@@ -1029,10 +1421,8 @@ class CapituloSubstituicao:
                     self._desenhar_linha_crawl(self.linhas[i], y)
 
             if self.reveladas >= len(self.linhas):
-                y_ultima = inicio_y + (len(self.linhas) - 1) * 44 - scroll
-                if y_ultima <= ALTURA * 0.75:
-                    aviso = self.fonte_rodape.render("ENTER/ESPACO para continuar | SHIFT para acelerar", True, COR_TEXTO_DIM)
-                    self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 32))
+                aviso = self.fonte_rodape.render("ENTER/ESPACO para prosseguir", True, COR_TEXTO_DIM)
+                self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - aviso.get_height() - 12))
 
             pygame.display.flip()
 
@@ -1061,12 +1451,14 @@ class CapituloSubstituicao:
 
 class CapituloPartes:
 
-    def __init__(self, tela, clock):
+    def __init__(self, tela, clock, audio: AudioManager | None = None):
         self.tela = tela
         self.clock = clock
-        self.fonte_titulo = pygame.font.SysFont("consolas", 34, bold=True)
-        self.fonte_texto = pygame.font.SysFont("consolas", 22, bold=True)
-        self.fonte_rodape = pygame.font.SysFont("consolas", 16)
+        self.audio = audio
+        self.ui_scale = min(LARGURA / 980, ALTURA / 640)
+        self.fonte_titulo = pygame.font.SysFont("consolas", max(34, int(34 * self.ui_scale * 0.9)), bold=True)
+        self.fonte_texto = pygame.font.SysFont("consolas", max(22, int(22 * self.ui_scale * 0.9)), bold=True)
+        self.fonte_rodape = pygame.font.SysFont("consolas", max(16, int(16 * self.ui_scale)))
 
         self.linhas = [
             "A jornada avanca, e uma nova estrategia emerge...",
@@ -1083,20 +1475,17 @@ class CapituloPartes:
 
         self.frames = 0
         self.reveladas = 0
-        self.reveal_interval = 35
-        self.scroll_vel = 0.6
-        self.scroll_vel_base = 0.6
+        self.reveal_interval = 20
+        self.scroll_vel = 1.05
         self.horizonte_y = 130
 
     def rodar(self):
         rodando = True
+        if self.audio is not None:
+            self.audio.tocar("cutscene")
         while rodando:
             self.clock.tick(FPS)
             self.frames += 1
-
-            # Detectar aceleração (SHIFT)
-            teclas = pygame.key.get_pressed()
-            self.scroll_vel = self.scroll_vel_base * 2.5 if teclas[pygame.K_LSHIFT] or teclas[pygame.K_RSHIFT] else self.scroll_vel_base
 
             if self.reveladas < len(self.linhas) and self.frames % self.reveal_interval == 0:
                 self.reveladas += 1
@@ -1106,10 +1495,10 @@ class CapituloPartes:
                     pygame.quit()
                     sys.exit()
                 if evento.type == pygame.KEYDOWN and evento.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE):
-                    if self.reveladas >= len(self.linhas):
-                        y_ultima = ALTURA + 40 + (len(self.linhas) - 1) * 44 - self.frames * self.scroll_vel
-                        if y_ultima <= ALTURA * 0.75:
-                            rodando = False
+                    if self.reveladas < len(self.linhas):
+                        self.reveladas = len(self.linhas)
+                    else:
+                        rodando = False
 
             self.tela.fill((4, 6, 16))
             self._desenhar_estrelas()
@@ -1126,10 +1515,8 @@ class CapituloPartes:
                     self._desenhar_linha_crawl(self.linhas[i], y)
 
             if self.reveladas >= len(self.linhas):
-                y_ultima = inicio_y + (len(self.linhas) - 1) * 44 - scroll
-                if y_ultima <= ALTURA * 0.75:
-                    aviso = self.fonte_rodape.render("ENTER/ESPACO para continuar | SHIFT para acelerar", True, COR_TEXTO_DIM)
-                    self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - 32))
+                aviso = self.fonte_rodape.render("ENTER/ESPACO para prosseguir", True, COR_TEXTO_DIM)
+                self.tela.blit(aviso, (LARGURA // 2 - aviso.get_width() // 2, ALTURA - aviso.get_height() - 12))
 
             pygame.display.flip()
 
@@ -1158,17 +1545,24 @@ class CapituloPartes:
 
 class Menu:
 
-    def __init__(self, tela, clock):
+    def __init__(self, tela, clock, audio: AudioManager | None = None, modo_tela: str = "cheia"):
         self.tela = tela
         self.clock = clock
-        self.fonte_titulo = pygame.font.SysFont("consolas", 38, bold=True)
-        self.fonte_botao = pygame.font.SysFont("consolas", 22, bold=True)
+        self.audio = audio
+        self.modo_tela = modo_tela
+        self.ui_scale = min(LARGURA / 980, ALTURA / 640)
+        self.fonte_titulo = pygame.font.SysFont("consolas", max(38, int(38 * self.ui_scale)), bold=True)
+        self.fonte_botao = pygame.font.SysFont("consolas", max(33, int(33 * self.ui_scale)), bold=True)
+        self.fonte_subtitulo = pygame.font.SysFont("consolas", max(24, int(24 * self.ui_scale)))
 
-        btn_w, btn_h = 240, 56
+        btn_w, btn_h = int(320 * self.ui_scale), int(72 * self.ui_scale)
         cx = LARGURA // 2
-        self.rect_jogar = pygame.Rect(cx - btn_w // 2, 250, btn_w, btn_h)
-        self.rect_info = pygame.Rect(cx - btn_w // 2, 325, btn_w, btn_h)
-        self.rect_sair = pygame.Rect(cx - btn_w // 2, 400, btn_w, btn_h)
+        y0 = int(ALTURA * 0.42)
+        gap = int(btn_h * 1.3)
+        self.rect_jogar = pygame.Rect(cx - btn_w // 2, y0, btn_w, btn_h)
+        self.rect_info = pygame.Rect(cx - btn_w // 2, y0 + gap, btn_w, btn_h)
+        self.rect_sair = pygame.Rect(cx - btn_w // 2, y0 + 2 * gap, btn_w, btn_h)
+        self.rect_modo_tela = pygame.Rect(cx - btn_w // 2, y0 + 3 * gap, btn_w, btn_h)
 
     def _desenhar_botao(self, rect, texto, hover):
         cor_fundo = (40, 55, 110) if hover else (25, 35, 72)
@@ -1180,6 +1574,8 @@ class Menu:
         self.tela.blit(surf, (rect.centerx - surf.get_width() // 2, rect.centery - surf.get_height() // 2))
 
     def rodar(self):
+        if self.audio is not None:
+            self.audio.tocar("menu")
         while True:
             self.clock.tick(FPS)
             mouse = pygame.mouse.get_pos()
@@ -1194,17 +1590,21 @@ class Menu:
                         return "info"
                     if self.rect_sair.collidepoint(mouse):
                         self._encerrar()
+                    if self.rect_modo_tela.collidepoint(mouse):
+                        return "toggle_tela"
 
             self.tela.fill(COR_FUNDO)
             titulo = self.fonte_titulo.render("SLAY THE INTEGRAL", True, COR_OURO)
-            self.tela.blit(titulo, (LARGURA // 2 - titulo.get_width() // 2, 160))
+            self.tela.blit(titulo, (LARGURA // 2 - titulo.get_width() // 2, int(ALTURA * 0.18)))
 
-            subt = pygame.font.SysFont("consolas", 16).render("A SERIOUS GAME PRODUCTION", True, COR_TEXTO_DIM)
-            self.tela.blit(subt, (LARGURA // 2 - subt.get_width() // 2, 205))
+            subt = self.fonte_subtitulo.render("A SERIOUS GAME PRODUCTION", True, COR_TEXTO_DIM)
+            self.tela.blit(subt, (LARGURA // 2 - subt.get_width() // 2, int(ALTURA * 0.25)))
 
             self._desenhar_botao(self.rect_jogar, "JOGAR", self.rect_jogar.collidepoint(mouse))
             self._desenhar_botao(self.rect_info, "INFORMACOES", self.rect_info.collidepoint(mouse))
             self._desenhar_botao(self.rect_sair, "SAIR", self.rect_sair.collidepoint(mouse))
+            texto_modo = "MODO: TELA CHEIA" if self.modo_tela == "cheia" else "MODO: JANELA"
+            self._desenhar_botao(self.rect_modo_tela, texto_modo, self.rect_modo_tela.collidepoint(mouse))
             pygame.display.flip()
 
     def _encerrar(self):
@@ -1218,17 +1618,85 @@ class Menu:
         sys.exit()
 
 
-class InfoScene:
+class FinalVictoryScene:
 
-    def __init__(self, tela, clock):
+    def __init__(self, tela, clock, audio: AudioManager | None = None):
         self.tela = tela
         self.clock = clock
-        self.fonte_titulo = pygame.font.SysFont("consolas", 34, bold=True)
-        self.fonte_texto = pygame.font.SysFont("consolas", 21)
-        self.fonte_pequena = pygame.font.SysFont("consolas", 16)
+        self.audio = audio
+        self.ui_scale = min(LARGURA / 980, ALTURA / 640)
+        self.fonte_titulo = pygame.font.SysFont("consolas", max(44, int(44 * self.ui_scale)), bold=True)
+        self.fonte_sub = pygame.font.SysFont("consolas", max(22, int(22 * self.ui_scale)), bold=True)
+        self.fonte_botao = pygame.font.SysFont("consolas", max(22, int(22 * self.ui_scale)), bold=True)
+
+        btn_w, btn_h = int(340 * self.ui_scale), int(78 * self.ui_scale)
+        cx = LARGURA // 2
+        y0 = int(ALTURA * 0.55)
+        gap = int(btn_h * 1.25)
+        self.rect_menu = pygame.Rect(cx - btn_w // 2, y0, btn_w, btn_h)
+        self.rect_sair = pygame.Rect(cx - btn_w // 2, y0 + gap, btn_w, btn_h)
+
+    def _desenhar_botao(self, rect: pygame.Rect, texto: str, hover: bool):
+        cor_fundo = (40, 55, 110) if hover else (25, 35, 72)
+        cor_borda = (140, 170, 255) if hover else COR_BORDA
+        cor_texto = (255, 255, 255) if hover else COR_TEXTO_DIM
+        pygame.draw.rect(self.tela, cor_fundo, rect, border_radius=10)
+        pygame.draw.rect(self.tela, cor_borda, rect, 2, border_radius=10)
+        surf = self.fonte_botao.render(texto, True, cor_texto)
+        self.tela.blit(surf, (rect.centerx - surf.get_width() // 2, rect.centery - surf.get_height() // 2))
+
+    def rodar(self) -> str:
+        if self.audio is not None:
+            self.audio.tocar("vitoria")
+
+        while True:
+            self.clock.tick(FPS)
+            mouse = pygame.mouse.get_pos()
+
+            for evento in pygame.event.get():
+                if evento.type == pygame.QUIT:
+                    return "sair"
+
+                if evento.type == pygame.KEYDOWN:
+                    if evento.key in (pygame.K_ESCAPE, pygame.K_q):
+                        return "sair"
+                    if evento.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        return "menu"
+
+                if evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1:
+                    if self.rect_menu.collidepoint(mouse):
+                        return "menu"
+                    if self.rect_sair.collidepoint(mouse):
+                        return "sair"
+
+            self.tela.fill((8, 14, 30))
+
+            titulo = self.fonte_titulo.render("VOCE GANHOU!", True, COR_OURO)
+            sub = self.fonte_sub.render("Parabens, voce concluiu Slay the Integral.", True, COR_TEXTO)
+            self.tela.blit(titulo, (LARGURA // 2 - titulo.get_width() // 2, int(ALTURA * 0.24)))
+            self.tela.blit(sub, (LARGURA // 2 - sub.get_width() // 2, int(ALTURA * 0.33)))
+
+            self._desenhar_botao(self.rect_menu, "VOLTAR AO MENU", self.rect_menu.collidepoint(mouse))
+            self._desenhar_botao(self.rect_sair, "SAIR DO JOGO", self.rect_sair.collidepoint(mouse))
+
+            pygame.display.flip()
+
+
+class InfoScene:
+
+    def __init__(self, tela, clock, audio: AudioManager | None = None):
+        self.tela = tela
+        self.clock = clock
+        self.audio = audio
+        self.ui_scale = min(LARGURA / 980, ALTURA / 640)
+        self.fonte_titulo = pygame.font.SysFont("consolas", max(41, int(41 * self.ui_scale)), bold=True)
+        self.fonte_texto = pygame.font.SysFont("consolas", max(27, int(27 * self.ui_scale)))
+        self.fonte_pequena = pygame.font.SysFont("consolas", max(22, int(22 * self.ui_scale)))
 
     def rodar(self):
         rodando = True
+        if self.audio is not None:
+            self.audio.tocar("menu")
         while rodando:
             self.clock.tick(FPS)
 
@@ -1263,24 +1731,62 @@ class InfoScene:
             pygame.display.flip()
 
 
+def aplicar_modo_tela(modo_tela: str):
+    global LARGURA, ALTURA
+
+    if modo_tela == "janela":
+        try:
+            tela = pygame.display.set_mode((LARGURA_JANELA, ALTURA_JANELA), pygame.SCALED)
+        except Exception:
+            tela = pygame.display.set_mode((LARGURA_JANELA, ALTURA_JANELA))
+        LARGURA, ALTURA = LARGURA_JANELA, ALTURA_JANELA
+        return tela
+
+    try:
+        tela = pygame.display.set_mode((LARGURA_BASE, ALTURA_BASE), pygame.FULLSCREEN | pygame.SCALED)
+        LARGURA, ALTURA = LARGURA_BASE, ALTURA_BASE
+        return tela
+    except Exception:
+        info = pygame.display.Info()
+        escala = min(info.current_w / LARGURA_BASE, info.current_h / ALTURA_BASE)
+        LARGURA = max(960, int(LARGURA_BASE * escala))
+        ALTURA = max(540, int(ALTURA_BASE * escala))
+        tela = pygame.display.set_mode((LARGURA, ALTURA), pygame.FULLSCREEN)
+        return tela
+
+
 if __name__ == "__main__":
     random.seed()
     pygame.init()
-    tela = pygame.display.set_mode((LARGURA, ALTURA), pygame.FULLSCREEN)
+    modo_tela = "cheia"
+    tela = aplicar_modo_tela(modo_tela)
     clock = pygame.time.Clock()
     pygame.display.set_caption("Slay the integral - Um Roguelike de Turnos")
+    audio = AudioManager()
 
-    menu = Menu(tela, clock)
     while True:
+        menu = Menu(tela, clock, audio, modo_tela=modo_tela)
         opcao = menu.rodar()
         if opcao == "jogar":
-            break
-        if opcao == "info":
-            info = InfoScene(tela, clock)
+            intro = IntroScene(tela, clock, audio)
+            intro.rodar()
+
+            jogo = CombatScene(tela, clock, audio)
+            resultado = jogo.rodar()
+            if resultado == "menu":
+                continue
+
+            if resultado == "vitoria_final":
+                tela_vitoria = FinalVictoryScene(tela, clock, audio)
+                acao = tela_vitoria.rodar()
+                if acao == "menu":
+                    continue
+
+            pygame.quit()
+            sys.exit()
+        elif opcao == "info":
+            info = InfoScene(tela, clock, audio)
             info.rodar()
-
-    intro = IntroScene(tela, clock)
-    intro.rodar()
-
-    jogo = CombatScene(tela, clock)
-    jogo.rodar()
+        elif opcao == "toggle_tela":
+            modo_tela = "janela" if modo_tela == "cheia" else "cheia"
+            tela = aplicar_modo_tela(modo_tela)
